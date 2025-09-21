@@ -1,8 +1,7 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+// * Para migrar la base de datos, ejecutar en la terminal: npx prisma migrate dev --name init
 
 generator client {
   provider = "prisma-client-js"
@@ -10,6 +9,153 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "mysql"
   url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  VENDOR      // Vendedor (farmacia)
+  BUYER       // Comprador (paciente)
+  CONSULTANT  // Consultor (auditor/soporte)
+}
+
+enum OrderStatus {
+  INICIO         // estado inicial - creado por comprador
+  VALIDACION     // verificación de fórmula/stock por vendedor
+  CONFIRMACION   // pago verificado/aprobado por vendedor  
+  LLEGADA        // pedido entregado al comprador (terminal)
+  CANCELADO      // cancelado por comprador (solo desde INICIO)
+}
+
+model User {
+  id         Int      @id @default(autoincrement())
+  email      String   @unique
+  password   String   // Hash del password
+  name       String
+  role       Role     @default(BUYER)
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // Relaciones
+  products       Product[]       @relation("VendorProducts")
+  ordersAsBuyer  Order[]         @relation("BuyerOrders")
+  ordersAsVendor Order[]         @relation("VendorOrders")
+  timelines      OrderTimeline[] @relation("ActorTimelines")
+  idempotencies  IdempotencyKey[]
+
+  @@index([email])
+  @@index([role])
+}
+
+model Product {
+  id          Int       @id @default(autoincrement())
+  sku         String?   @unique
+  name        String    // Para búsqueda con parámetro 'q'
+  description String?   @db.Text
+  category    String?   // Para filtro por categoría
+  price       Decimal   @db.Decimal(10,2)
+  stock       Int       @default(0)
+  isActive    Boolean   @default(true)  // Para filtro is_active y soft delete
+  deletedAt   DateTime? // Para soft delete
+  createdById Int?      
+  createdBy   User?     @relation("VendorProducts", fields: [createdById], references: [id])
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  // Relaciones
+  orderItems  OrderItem[]
+
+  // Índices para optimizar consultas
+  @@index([isActive])
+  @@index([name])
+  @@index([category])
+  @@index([price])
+  @@index([createdAt])
+  // Para full text search en MySQL:
+  // CREATE FULLTEXT INDEX product_fulltext ON Product(name, description);
+}
+
+model Order {
+  id              Int           @id @default(autoincrement())
+  code            String        @unique @default(cuid()) // Código único del pedido
+  buyerId         Int
+  buyer           User          @relation("BuyerOrders", fields: [buyerId], references: [id])
+  vendorId        Int?          // Vendedor asignado (opcional)
+  vendor          User?         @relation("VendorOrders", fields: [vendorId], references: [id])
+  status          OrderStatus   @default(INICIO)
+  total           Decimal       @db.Decimal(12,2)
+  
+  // Dirección de envío (JSON para flexibilidad)
+  shippingAddress Json?         // {street, city, state, zipCode, phone}
+  
+  // Metadatos adicionales
+  metadata        Json?         
+  
+  // Control de concurrencia optimista
+  version         Int           @default(1)  // Para ETag
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  // Relaciones
+  items           OrderItem[]
+  timeline        OrderTimeline[]
+  idempotency     IdempotencyKey? @relation(fields: [idempotencyId], references: [id])
+  idempotencyId   Int?            @unique
+  
+  // Índices para consultas eficientes
+  @@index([status])
+  @@index([buyerId])
+  @@index([vendorId])
+  @@index([createdAt])
+  @@index([total])
+}
+
+model OrderItem {
+  id        Int     @id @default(autoincrement())
+  orderId   Int
+  order     Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  productId Int
+  product   Product @relation(fields: [productId], references: [id])
+  quantity  Int
+  price     Decimal @db.Decimal(10,2) // Precio al momento del pedido
+  subtotal  Decimal @db.Decimal(12,2) // quantity * price
+
+  @@unique([orderId, productId]) // Un producto por pedido
+}
+
+model OrderTimeline {
+  id         Int         @id @default(autoincrement())
+  orderId    Int
+  order      Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  actorId    Int?        // Usuario que realizó la acción
+  actor      User?       @relation("ActorTimelines", fields: [actorId], references: [id])
+  fromStatus OrderStatus? // Estado anterior (null para el primer registro)
+  toStatus   OrderStatus  // Estado nuevo
+  action     String       // "validar", "confirmar", "llegada", etc.
+  notes      String?      @db.Text // Notas adicionales
+  createdAt  DateTime     @default(now())
+
+  @@index([orderId, createdAt])
+}
+
+model IdempotencyKey {
+  id           Int      @id @default(autoincrement())
+  key          String   @unique  // El Idempotency-Key del header
+  userId       Int?     
+  user         User?    @relation(fields: [userId], references: [id])
+  requestHash  String?  // Hash de la request para validación adicional
+  responseData Json?    // Respuesta guardada
+  httpStatus   Int?     // Status code de la respuesta
+  used         Boolean  @default(false)
+  createdAt    DateTime @default(now())
+  expiresAt    DateTime // Para limpieza automática (24-48 horas)
+
+  // Relación con orders
+  order        Order?   
+  
+  @@index([key])
+  @@index([expiresAt])
 }
