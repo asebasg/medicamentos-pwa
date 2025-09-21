@@ -2,6 +2,7 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 // * Para migrar la base de datos, ejecutar en la terminal: npx prisma migrate dev --name init
+// Esto sirve para generar el cliente de prisma
 
 generator client {
   provider = "prisma-client-js"
